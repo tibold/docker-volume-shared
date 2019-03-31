@@ -202,7 +202,7 @@ func (b beegfsDriver) Capabilities() *volume.CapabilitiesResponse {
 func discoverVolumes(driver *beegfsDriver) {
 
 	log.Infof("Volume discovery.")
-	if files, err := ioutil.ReadDir(*root); err != nil {
+	if files, err := ioutil.ReadDir(*root); err == nil {
 		for _, file := range files {
 			log.Infof("Testing %s if it is a volume.", file.Name())
 			if file.IsDir() {
@@ -220,6 +220,8 @@ func discoverVolumes(driver *beegfsDriver) {
 				}
 			}
 		}
+	} else {
+		log.Warningf("Failed to iterate root folder '%s': %s", *root, err.Error())
 	}
 }
 
