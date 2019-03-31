@@ -157,6 +157,8 @@ func (b beegfsDriver) Unmount(r *volume.UnmountRequest) error {
 func (b beegfsDriver) Get(r *volume.GetRequest) (*volume.GetResponse, error) {
 	log.Infof("Get: %s", r.Name)
 
+	discoverVolumes(&b)
+
 	if v, ok := b.mounts[r.Name]; ok {
 		return &volume.GetResponse{
 			Volume: &volume.Volume{
@@ -172,21 +174,7 @@ func (b beegfsDriver) Get(r *volume.GetRequest) (*volume.GetResponse, error) {
 func (b beegfsDriver) List() (*volume.ListResponse, error) {
 	log.Infof("List")
 
-	log.Debugf("Looking for volumes created by other nodes.")
-	if files, err := ioutil.ReadDir(*root); err != nil {
-		for _, file := range files {
-			if file.IsDir() {
-				if _, ok := b.mounts[file.Name()]; !ok {
-					b.mounts[file.Name()] = &beegfsMount{
-						name: file.Name(),
-						path: filepath.Join(*root, file.Name()),
-						root: *root,
-						keep: false,
-					}
-				}
-			}
-		}
-	}
+	discoverVolumes(&b)
 
 	volumes := []*volume.Volume{}
 
@@ -195,6 +183,7 @@ func (b beegfsDriver) List() (*volume.ListResponse, error) {
 			volumes = append(volumes, &volume.Volume{Name: b.mounts[v].name, Mountpoint: b.mounts[v].path})
 		} else {
 			// Volume must have been remove by others.
+			log.Infof("Volume %s was removed by other nodes.", v)
 			delete(b.mounts, v)
 		}
 	}
@@ -207,6 +196,30 @@ func (b beegfsDriver) Capabilities() *volume.CapabilitiesResponse {
 		Capabilities: volume.Capability{
 			Scope: "global",
 		},
+	}
+}
+
+func discoverVolumes(driver *beegfsDriver) {
+
+	log.Infof("Volume discovery.")
+	if files, err := ioutil.ReadDir(*root); err != nil {
+		for _, file := range files {
+			log.Infof("Testing %s if it is a volume.", file.Name())
+			if file.IsDir() {
+				name := file.Name()
+				if _, ok := driver.mounts[name]; !ok {
+
+					log.Infof("Discovered volume %s.", name)
+
+					driver.mounts[name] = &beegfsMount{
+						name: name,
+						path: filepath.Join(*root, name),
+						root: *root,
+						keep: false,
+					}
+				}
+			}
+		}
 	}
 }
 
