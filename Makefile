@@ -1,6 +1,6 @@
 all: deps compile
 
-VERSION=0.4.0
+VERSION=0.4.0-1
 
 compile:
 	go build
