@@ -1,14 +1,19 @@
+// +build linux
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
-	log "github.com/Sirupsen/logrus"
+	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
+
+	log "github.com/Sirupsen/logrus"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/docker/go-plugins-helpers/volume"
@@ -19,17 +24,18 @@ type beegfsMount struct {
 	name string
 	path string
 	root string
+	keep bool
 }
 
 type beegfsDriver struct {
-	mounts  map[string]*beegfsMount
-	m       *sync.Mutex
+	mounts map[string]*beegfsMount
+	m      *sync.Mutex
 }
 
 func newBeeGFSDriver(root string) beegfsDriver {
 	d := beegfsDriver{
-		mounts:  make(map[string]*beegfsMount),
-		m:       &sync.Mutex{},
+		mounts: make(map[string]*beegfsMount),
+		m:      &sync.Mutex{},
 	}
 
 	return d
@@ -37,6 +43,7 @@ func newBeeGFSDriver(root string) beegfsDriver {
 
 func (b beegfsDriver) Create(r *volume.CreateRequest) error {
 	var volumeRoot string
+	var volumeKeep bool
 
 	log.Infof("Create: %s, %v", r.Name, r.Options)
 
@@ -51,6 +58,12 @@ func (b beegfsDriver) Create(r *volume.CreateRequest) error {
 	} else {
 		// Assume the default root
 		volumeRoot = *root
+	}
+
+	if optsKeep, ok := r.Options["keep"]; ok {
+		if parsedKeep, err := strconv.ParseBool(optsKeep); err == nil {
+			volumeKeep = parsedKeep
+		}
 	}
 
 	dest := filepath.Join(volumeRoot, r.Name)
@@ -73,11 +86,14 @@ func (b beegfsDriver) Create(r *volume.CreateRequest) error {
 		return err
 	}
 
-	b.mounts[r.Name] = &beegfsMount {
+	mount := &beegfsMount{
 		name: r.Name,
 		path: volumePath,
 		root: volumeRoot,
+		keep: volumeKeep,
 	}
+	b.mounts[r.Name] = mount
+	saveMountInfo(mount)
 
 	if *verbose {
 		spew.Dump(b.mounts)
@@ -92,7 +108,14 @@ func (b beegfsDriver) Remove(r *volume.RemoveRequest) error {
 	b.m.Lock()
 	defer b.m.Unlock()
 
-	if _, ok := b.mounts[r.Name]; ok {
+	if mount, ok := b.mounts[r.Name]; ok {
+
+		loadMountInfo(mount)
+
+		if !mount.keep {
+			os.RemoveAll(mount.path)
+		}
+
 		delete(b.mounts, r.Name)
 	}
 
@@ -116,7 +139,7 @@ func (b beegfsDriver) Mount(r *volume.MountRequest) (*volume.MountResponse, erro
 	if !isbeegfs(dest) {
 		emsg := fmt.Sprintf("Cannot mount volume %s as it's not on a BeeGFS filesystem", dest)
 		log.Error(emsg)
-        return nil, errors.New(emsg)
+		return nil, errors.New(emsg)
 	}
 
 	if _, ok := b.mounts[r.Name]; ok {
@@ -143,27 +166,48 @@ func (b beegfsDriver) Get(r *volume.GetRequest) (*volume.GetResponse, error) {
 		}, nil
 	}
 
-	return nil, errors.New(fmt.Sprintf("volume %s unknown", r.Name))
+	return nil, fmt.Errorf("volume %s unknown", r.Name)
 }
 
 func (b beegfsDriver) List() (*volume.ListResponse, error) {
 	log.Infof("List")
 
+	log.Debugf("Looking for volumes created by other nodes.")
+	if files, err := ioutil.ReadDir(*root); err != nil {
+		for _, file := range files {
+			if file.IsDir() {
+				if _, ok := b.mounts[file.Name()]; !ok {
+					b.mounts[file.Name()] = &beegfsMount{
+						name: file.Name(),
+						path: filepath.Join(*root, file.Name()),
+						root: *root,
+						keep: false,
+					}
+				}
+			}
+		}
+	}
+
 	volumes := []*volume.Volume{}
 
 	for v := range b.mounts {
-		volumes = append(volumes, &volume.Volume{Name: b.mounts[v].name, Mountpoint: b.mounts[v].path})
+		if isbeegfs(b.mounts[v].path) {
+			volumes = append(volumes, &volume.Volume{Name: b.mounts[v].name, Mountpoint: b.mounts[v].path})
+		} else {
+			// Volume must have been remove by others.
+			delete(b.mounts, v)
+		}
 	}
 
 	return &volume.ListResponse{Volumes: volumes}, nil
 }
 
-func (d beegfsDriver) Capabilities() *volume.CapabilitiesResponse {
-    return &volume.CapabilitiesResponse{
-        Capabilities: volume.Capability{
-            Scope: "global",
-        },
-    }
+func (b beegfsDriver) Capabilities() *volume.CapabilitiesResponse {
+	return &volume.CapabilitiesResponse{
+		Capabilities: volume.Capability{
+			Scope: "global",
+		},
+	}
 }
 
 // Check if the parent directory (where the volume will be created)
@@ -199,4 +243,21 @@ func createDest(dest string) error {
 	}
 
 	return nil
+}
+
+func saveMountInfo(mount *beegfsMount) {
+	metaFile := filepath.Join(mount.path, "meta.json")
+
+	if content, err := json.MarshalIndent(mount, "", ""); err == nil {
+		_ = ioutil.WriteFile(metaFile, content, 0600)
+	}
+}
+
+func loadMountInfo(mount *beegfsMount) {
+
+	metaFile := filepath.Join(mount.path, "meta.json")
+
+	if content, err := ioutil.ReadFile(metaFile); err == nil {
+		_ = json.Unmarshal([]byte(content), &mount)
+	}
 }
