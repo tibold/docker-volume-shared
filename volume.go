@@ -156,6 +156,19 @@ func (volume *sharedVolume) lock() error {
 	return err
 }
 
+// Unlocks the volume
+func (volume *sharedVolume) unlock() error {
+	var err error
+
+	lockFilename := volume.GetLockFile()
+
+	if _, err = os.Stat(lockFilename); err == nil {
+		err = os.Remove(lockFilename)
+	}
+
+	return err
+}
+
 // Returns true if any node has mounted the volume
 func (volume *sharedVolume) isMounted() (bool, error) {
 	locksDir := volume.GetLocksDir()
@@ -203,22 +216,23 @@ func (volume *sharedVolume) getMounts() map[string]string {
 	return mounts
 }
 
-// Unlocks the volume
-func (volume *sharedVolume) unlock() {
-
-	lockFilename := volume.GetLockFile()
-
-	if _, err := os.Stat(lockFilename); err == nil {
-		os.Remove(lockFilename)
-	}
-}
-
 func (volume *sharedVolume) mount(id string) error {
 	mountFile := volume.GetMountFile(id)
 
 	if file, err := os.OpenFile(mountFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600); err == nil {
-		file.WriteString(*hostname)
-		file.Close()
+		written, err := file.WriteString(*hostname)
+
+		if err == nil {
+			if written != len(*hostname) {
+				err = io.ErrShortWrite
+			} else {
+				err = file.Close()
+			}
+		}
+
+		if err != nil {
+			return err
+		}
 	} else {
 		return fmt.Errorf("Volume %s is already mounted", volume.Name)
 	}

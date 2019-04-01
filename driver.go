@@ -97,10 +97,16 @@ func (driver sharedVolumeDriver) Create(request *dockerVolume.CreateRequest) err
 			return err
 		}
 
-		volume.saveMetadata()
+		if err = volume.saveMetadata(); err != nil {
+			return err
+		}
 	}
 
-	volume.lock()
+	if err := volume.lock(); err != nil {
+		// If the volume cannot be locked, we risk that other nodes may delete it
+		return err
+	}
+
 	driver.volumes[request.Name] = volume
 
 	if *debug {
@@ -150,11 +156,17 @@ func (driver sharedVolumeDriver) Remove(request *dockerVolume.RemoveRequest) err
 
 	if volume, ok := driver.volumes[request.Name]; ok {
 
-		volume.unlock()
+		err := volume.unlock()
 
-		volume.delete()
+		if err == nil {
+			err = volume.delete()
+		}
 
-		delete(driver.volumes, request.Name)
+		if err == nil {
+			delete(driver.volumes, request.Name)
+		} else {
+			return err
+		}
 	}
 
 	return nil
@@ -198,7 +210,8 @@ func (driver sharedVolumeDriver) Unmount(request *dockerVolume.UnmountRequest) e
 	log.Infof("Unmount: %s", request.Name)
 
 	if volume, ok := driver.volumes[request.Name]; ok {
-		_ = volume.unmount(request.ID)
+		err := volume.unmount(request.ID)
+		return err
 	}
 
 	return nil
