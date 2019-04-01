@@ -5,7 +5,7 @@
         "types": [
             "docker.volumedriver/1.0"
         ],
-        "socket": "docker-volume-shared.sock"
+        "socket": "sharedfs.sock"
     },
     "entrypoint": [
         "/docker-volume-shared",

@@ -37,5 +37,5 @@ func main() {
 
 	driver := newBeeGFSDriver(*root)
 	handler := volume.NewHandler(driver)
-	fmt.Println(handler.ServeUnix("shared", 0))
+	fmt.Println(handler.ServeUnix("sharedfs", 0))
 }

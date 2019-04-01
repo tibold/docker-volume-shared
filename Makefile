@@ -1,49 +1,33 @@
-all: deps compile
+PLUGIN_NAME = tibold/sharedfs
+PLUGIN_TAG ?= next
 
-VERSION=0.4.0-1
-
-compile:
-	go build
-
-deps:
-	go get
-
-fmt:
-	gofmt -s -w -l .
-
-dist: rpm deb
-
-rpm-deps:
-	yum install -y ruby ruby-devel rubygems rpm-build make go git
-	gem install fpm
-
-rpm: compile rpm-deps
-	mkdir -p obj/redhat/usr/bin
-	mkdir -p obj/redhat/lib/systemd/system/
-	install -m 0755 docker-volume-beegfs obj/redhat/usr/bin
-	install -m 0644 docker-volume-beegfs.service obj/redhat/lib/systemd/system
-	fpm -C obj/redhat --vendor RedCoolBeans -m "info@redcoolbeans.com" -f \
-		-s dir -t rpm -n docker-volume-beegfs \
-		--after-install files/post-install-systemd --version ${VERSION} . && \
-		rm -fr obj/redhat
-
-# builds are done on RHEL, when building locally on Debian use the following:
-# apt-get install -y ruby ruby-dev gcc golang git make
-deb-deps:
-	yum install -y ruby ruby-devel rubygems rpm-build make go git
-	gem install fpm
-
-deb: compile deb-deps
-	mkdir -p obj/debian/usr/bin
-	mkdir -p obj/debian/lib/systemd/system/
-	install -m 0755 docker-volume-beegfs obj/debian/usr/bin
-	install -m 0644 docker-volume-beegfs.service obj/debian/lib/systemd/system
-	fpm -C obj/debian --vendor RedCoolBeans -m "info@redcoolbeans.com" -f \
-		-s dir -t deb -n docker-volume-beegfs \
-		--after-install files/post-install-systemd --version ${VERSION} . && \
-		rm -fr obj/debian
+all: clean rootfs create
 
 clean:
-	rm -fr obj *.deb *.rpm docker-volume-beegfs
+	@echo "### rm ./plugin"
+	@rm -rf ./plugin
 
-.PHONY: clean rpm-deps deb-deps fmt deps compile
+rootfs:
+	@echo "### docker build: rootfs image with docker-volume-sharedfs"
+	@docker build -q -t ${PLUGIN_NAME}:rootfs .
+	@echo "### create rootfs directory in ./plugin/rootfs"
+	@mkdir -p ./plugin/rootfs
+	@docker create --name tmp ${PLUGIN_NAME}:rootfs
+	@docker export tmp | tar -x -C ./plugin/rootfs
+	@echo "### copy config.json to ./plugin/"
+	@cp config.json ./plugin/
+	@docker rm -vf tmp
+
+create:
+	@echo "### remove existing plugin ${PLUGIN_NAME}:${PLUGIN_TAG} if exists"
+	@docker plugin rm -f ${PLUGIN_NAME}:${PLUGIN_TAG} || true
+	@echo "### create new plugin ${PLUGIN_NAME}:${PLUGIN_TAG} from ./plugin"
+	@docker plugin create ${PLUGIN_NAME}:${PLUGIN_TAG} ./plugin
+
+enable:		
+	@echo "### enable plugin ${PLUGIN_NAME}:${PLUGIN_TAG}"		
+	@docker plugin enable ${PLUGIN_NAME}:${PLUGIN_TAG}
+
+push:  clean rootfs create enable
+	@echo "### push plugin ${PLUGIN_NAME}:${PLUGIN_TAG}"
+	@docker plugin push ${PLUGIN_NAME}:${PLUGIN_TAG}
