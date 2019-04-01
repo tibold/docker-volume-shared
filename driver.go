@@ -1,278 +1,215 @@
 // +build linux
+
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
-	"path"
 	"path/filepath"
 	"strconv"
 	"sync"
-	"syscall"
+	"time"
 
 	log "github.com/Sirupsen/logrus"
 
 	"github.com/davecgh/go-spew/spew"
-	"github.com/docker/go-plugins-helpers/volume"
+	dockerVolume "github.com/docker/go-plugins-helpers/volume"
 )
 
-// A single volume instance
-type beegfsMount struct {
-	name string
-	path string
-	root string
-	keep bool
+type sharedVolumeDriver struct {
+	volumes  map[string]*sharedVolume
+	mutex    *sync.Mutex
+	root     string
+	hostname string
 }
 
-type beegfsDriver struct {
-	mounts map[string]*beegfsMount
-	m      *sync.Mutex
+func newBeeGFSDriver(root string) sharedVolumeDriver {
+	hostname, _ := os.Hostname()
+
+	driver := sharedVolumeDriver{
+		volumes:  make(map[string]*sharedVolume),
+		mutex:    &sync.Mutex{},
+		root:     root,
+		hostname: hostname,
+	}
+
+	return driver
 }
 
-func newBeeGFSDriver(root string) beegfsDriver {
-	d := beegfsDriver{
-		mounts: make(map[string]*beegfsMount),
-		m:      &sync.Mutex{},
-	}
-
-	return d
-}
-
-func (b beegfsDriver) Create(r *volume.CreateRequest) error {
-	var volumeRoot string
-	var volumeKeep bool
-
-	log.Infof("Create: %s, %v", r.Name, r.Options)
-
-	b.m.Lock()
-	defer b.m.Unlock()
-
-	// Handle options (unrecognized options are silently ignored):
-	// root: directory to create new volumes (this should correspond with
-	//       beegfs-mounts.conf).
-	if optsRoot, ok := r.Options["root"]; ok {
-		volumeRoot = optsRoot
-	} else {
-		// Assume the default root
-		volumeRoot = *root
-	}
-
-	if optsKeep, ok := r.Options["keep"]; ok {
-		if parsedKeep, err := strconv.ParseBool(optsKeep); err == nil {
-			volumeKeep = parsedKeep
-		}
-	}
-
-	dest := filepath.Join(volumeRoot, r.Name)
-	if !isbeegfs(dest) {
-		emsg := fmt.Sprintf("Cannot create volume %s as it's not on a BeeGFS filesystem", dest)
-		log.Error(emsg)
-		return errors.New(emsg)
-	}
-
-	fmt.Printf("mounts: %d", len(b.mounts))
-	if _, ok := b.mounts[r.Name]; ok {
-		imsg := fmt.Sprintf("Cannot create volume %s, it already exists", dest)
-		log.Info(imsg)
-		return nil
-	}
-
-	volumePath := filepath.Join(volumeRoot, r.Name)
-
-	if err := createDest(dest); err != nil {
-		return err
-	}
-
-	mount := &beegfsMount{
-		name: r.Name,
-		path: volumePath,
-		root: volumeRoot,
-		keep: volumeKeep,
-	}
-	b.mounts[r.Name] = mount
-	saveMountInfo(mount)
-
-	if *verbose {
-		spew.Dump(b.mounts)
-	}
-
-	return nil
-}
-
-func (b beegfsDriver) Remove(r *volume.RemoveRequest) error {
-	log.Infof("Remove: %s", r.Name)
-
-	b.m.Lock()
-	defer b.m.Unlock()
-
-	if mount, ok := b.mounts[r.Name]; ok {
-
-		loadMountInfo(mount)
-
-		if !mount.keep {
-			os.RemoveAll(mount.path)
-		}
-
-		delete(b.mounts, r.Name)
-	}
-
-	return nil
-}
-
-func (b beegfsDriver) Path(r *volume.PathRequest) (*volume.PathResponse, error) {
-	log.Debugf("Path: %s", r.Name)
-
-	if _, ok := b.mounts[r.Name]; ok {
-		return &volume.PathResponse{Mountpoint: b.mounts[r.Name].path}, nil
-	}
-
-	return nil, nil
-}
-
-func (b beegfsDriver) Mount(r *volume.MountRequest) (*volume.MountResponse, error) {
-	log.Infof("Mount: %s", r.Name)
-	dest := filepath.Join(b.mounts[r.Name].root, r.Name)
-
-	if !isbeegfs(dest) {
-		emsg := fmt.Sprintf("Cannot mount volume %s as it's not on a BeeGFS filesystem", dest)
-		log.Error(emsg)
-		return nil, errors.New(emsg)
-	}
-
-	if _, ok := b.mounts[r.Name]; ok {
-		return &volume.MountResponse{Mountpoint: b.mounts[r.Name].path}, nil
-	}
-
-	return nil, nil
-}
-
-func (b beegfsDriver) Unmount(r *volume.UnmountRequest) error {
-	log.Infof("Unmount: %s", r.Name)
-	return nil
-}
-
-func (b beegfsDriver) Get(r *volume.GetRequest) (*volume.GetResponse, error) {
-	log.Infof("Get: %s", r.Name)
-
-	discoverVolumes(&b)
-
-	if v, ok := b.mounts[r.Name]; ok {
-		return &volume.GetResponse{
-			Volume: &volume.Volume{
-				Name:       v.name,
-				Mountpoint: v.path,
-			},
-		}, nil
-	}
-
-	return nil, fmt.Errorf("volume %s unknown", r.Name)
-}
-
-func (b beegfsDriver) List() (*volume.ListResponse, error) {
-	log.Infof("List")
-
-	discoverVolumes(&b)
-
-	volumes := []*volume.Volume{}
-
-	for v := range b.mounts {
-		if isbeegfs(b.mounts[v].path) {
-			volumes = append(volumes, &volume.Volume{Name: b.mounts[v].name, Mountpoint: b.mounts[v].path})
-		} else {
-			// Volume must have been remove by others.
-			log.Infof("Volume %s was removed by other nodes.", v)
-			delete(b.mounts, v)
-		}
-	}
-
-	return &volume.ListResponse{Volumes: volumes}, nil
-}
-
-func (b beegfsDriver) Capabilities() *volume.CapabilitiesResponse {
-	return &volume.CapabilitiesResponse{
-		Capabilities: volume.Capability{
+func (driver sharedVolumeDriver) Capabilities() *dockerVolume.CapabilitiesResponse {
+	return &dockerVolume.CapabilitiesResponse{
+		Capabilities: dockerVolume.Capability{
 			Scope: "global",
 		},
 	}
 }
 
-func discoverVolumes(driver *beegfsDriver) {
+func (driver sharedVolumeDriver) Create(request *dockerVolume.CreateRequest) error {
+	// var volume *sharedVolume
 
-	log.Infof("Volume discovery.")
-	if files, err := ioutil.ReadDir(*root); err == nil {
-		for _, file := range files {
-			log.Infof("Testing %s if it is a volume.", file.Name())
-			if file.IsDir() {
-				name := file.Name()
-				if _, ok := driver.mounts[name]; !ok {
+	log.Infof("Create: %s, %v", request.Name, request.Options)
 
-					log.Infof("Discovered volume %s.", name)
+	driver.mutex.Lock()
+	defer driver.mutex.Unlock()
 
-					driver.mounts[name] = &beegfsMount{
-						name: name,
-						path: filepath.Join(*root, name),
-						root: *root,
-						keep: false,
-					}
-				}
+	volumePath := filepath.Join(driver.root, request.Name)
+
+	if _, err := os.Stat(volumePath); os.IsNotExist(err) {
+		// New volume
+		// Create volume from options.
+		volume := &sharedVolume{
+			Volume: &dockerVolume.Volume{
+				Name:       request.Name,
+				Mountpoint: volumePath,
+				CreatedAt:  time.Now().Format(time.RFC3339),
+			},
+			Protected: false,
+			Exclusive: true,
+		}
+
+		if optsProtected, ok := request.Options["protected"]; ok {
+			if protected, err := strconv.ParseBool(optsProtected); err == nil {
+				volume.Protected = protected
 			}
 		}
-	} else {
-		log.Warningf("Failed to iterate root folder '%s': %s", *root, err.Error())
-	}
-}
 
-// Check if the parent directory (where the volume will be created)
-// is of type 'beegfs' using the BEEGFS_MAGIC value.
-func isbeegfs(volumepath string) bool {
-	log.Debugf("isbeegfs() for %s", volumepath)
-	stat := syscall.Statfs_t{}
-	err := syscall.Statfs(path.Dir(volumepath), &stat)
-	if err != nil {
-		log.Errorf("Could not determine filesystem type for %s: %s", volumepath, err)
-		return false
-	}
+		if optsExclusive, ok := request.Options["exclusive"]; ok {
+			if exclusive, err := strconv.ParseBool(optsExclusive); err == nil {
+				volume.Exclusive = exclusive
+			}
+		}
 
-	log.Debugf("Type for %s: %d", volumepath, stat.Type)
-
-	// BEEGFS_MAGIC 0x19830326
-	return stat.Type == 428016422
-}
-
-func createDest(dest string) error {
-	fstat, err := os.Lstat(dest)
-
-	if os.IsNotExist(err) {
-		if err := os.MkdirAll(dest, 0755); err != nil {
+		if err := volume.create(); err != nil {
 			return err
 		}
-	} else if err != nil {
-		return err
+
+		volume.saveMetadata()
+		volume.lock()
+
+	} else if _, ok := driver.volumes[request.Name]; ok {
+
+		// Path exists and it is already part of the bookkeeping
+
+		message := fmt.Sprintf("Volume %s already exists.", request.Name)
+		log.Warning(message)
+		return nil
+
+	} else {
+		// Path exists but not part of the bookkeeping
+		// Load volume options from meta file.
+
+		volume := &sharedVolume{
+			Volume: &dockerVolume.Volume{
+				Name:       request.Name,
+				Mountpoint: volumePath,
+			},
+		}
+		volume.loadMetadata()
+		driver.volumes[request.Name] = volume
 	}
 
-	if fstat != nil && !fstat.IsDir() {
-		return fmt.Errorf("%v already exist and it's not a directory", dest)
+	if *debug {
+		spew.Dump(driver.volumes)
 	}
 
 	return nil
 }
 
-func saveMountInfo(mount *beegfsMount) {
-	metaFile := filepath.Join(mount.path, "meta.json")
+func (driver sharedVolumeDriver) Remove(request *dockerVolume.RemoveRequest) error {
+	log.Infof("Remove: %s", request.Name)
 
-	if content, err := json.MarshalIndent(mount, "", ""); err == nil {
-		_ = ioutil.WriteFile(metaFile, content, 0600)
+	driver.mutex.Lock()
+	defer driver.mutex.Unlock()
+
+	if volume, ok := driver.volumes[request.Name]; ok {
+
+		volume.unlock()
+
+		volume.delete()
+
+		delete(driver.volumes, request.Name)
 	}
+
+	return nil
 }
 
-func loadMountInfo(mount *beegfsMount) {
+func (driver sharedVolumeDriver) Path(request *dockerVolume.PathRequest) (*dockerVolume.PathResponse, error) {
+	log.Debugf("Path: %s", request.Name)
 
-	metaFile := filepath.Join(mount.path, "meta.json")
+	if volume, ok := driver.volumes[request.Name]; ok {
 
-	if content, err := ioutil.ReadFile(metaFile); err == nil {
-		_ = json.Unmarshal([]byte(content), &mount)
+		return &dockerVolume.PathResponse{
+			Mountpoint: volume.GetDataDir(),
+		}, nil
 	}
+
+	return nil, nil
+}
+
+func (driver sharedVolumeDriver) Mount(request *dockerVolume.MountRequest) (*dockerVolume.MountResponse, error) {
+	log.Infof("Mount: %s", request.Name)
+
+	if volume, ok := driver.volumes[request.Name]; ok {
+
+		if err := volume.mount(request.ID); err != nil {
+			return nil, fmt.Errorf("Failed to mount volume: %s", err.Error())
+		}
+
+		return &dockerVolume.MountResponse{
+			Mountpoint: volume.GetDataDir(),
+		}, nil
+	}
+
+	message := fmt.Sprintf("Cannot mount volume %s as it does not exist in the bookkeeping", request.Name)
+
+	log.Error(message)
+
+	return nil, errors.New(message)
+}
+
+func (driver sharedVolumeDriver) Unmount(request *dockerVolume.UnmountRequest) error {
+	log.Infof("Unmount: %s", request.Name)
+
+	if volume, ok := driver.volumes[request.Name]; ok {
+		_ = volume.unmount(request.ID)
+	}
+
+	return nil
+}
+
+func (driver sharedVolumeDriver) Get(request *dockerVolume.GetRequest) (*dockerVolume.GetResponse, error) {
+	log.Infof("Get: %s", request.Name)
+
+	if volume, ok := driver.volumes[request.Name]; ok {
+		responseVolume := &dockerVolume.Volume{
+			Name:       volume.Name,
+			Mountpoint: volume.GetDataDir(),
+			Status:     make(map[string]interface{}),
+		}
+
+		responseVolume.Status["locks"] = volume.getLocks()
+		responseVolume.Status["mounts"] = volume.getMounts()
+
+		return &dockerVolume.GetResponse{
+			Volume: responseVolume,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("volume %s unknown", request.Name)
+}
+
+func (driver sharedVolumeDriver) List() (*dockerVolume.ListResponse, error) {
+	log.Infof("List")
+
+	volumes := []*dockerVolume.Volume{}
+
+	for _, volume := range driver.volumes {
+		volumes = append(volumes, &dockerVolume.Volume{
+			Name:       volume.Name,
+			Mountpoint: volume.GetDataDir(),
+		})
+	}
+
+	return &dockerVolume.ListResponse{Volumes: volumes}, nil
 }

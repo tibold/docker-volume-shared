@@ -1,7 +1,7 @@
 {
     "go.enableCodeLens": {
-        "references": true,
-        "runtest": true
+        "references": false,
+        "runtest": false
     },
     "go.toolsEnvVars": {
         "GOARCH": "amd64",

@@ -1,0 +1,29 @@
+{
+    "description": "Shared Disk Volume plugin for Docker",
+    "documentation": "https://github.com/tibold/docker-volume-shared",
+    "interface": {
+        "types": [
+            "docker.volumedriver/1.0"
+        ],
+        "socket": "shared.sock"
+    },
+    "entrypoint": [
+        "/docker-volume-shared",
+        "--root=/volumes",
+        "--debug"
+
+    ],
+    "mounts": [{
+        "name": "volumes",
+        "destination": "/volumes",
+        "options": [
+          "rbind"
+        ],
+        "source": "/tmp",
+        "settable": [
+            "source"
+        ],
+        "type": "bind"
+    }],
+    "propagatedmount": "/volumes"
+}
