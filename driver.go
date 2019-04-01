@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -86,6 +87,7 @@ func (driver sharedVolumeDriver) Create(request *dockerVolume.CreateRequest) err
 
 		volume.saveMetadata()
 		volume.lock()
+		driver.volumes[request.Name] = volume
 
 	} else if _, ok := driver.volumes[request.Name]; ok {
 
@@ -106,6 +108,7 @@ func (driver sharedVolumeDriver) Create(request *dockerVolume.CreateRequest) err
 			},
 		}
 		volume.loadMetadata()
+		volume.lock()
 		driver.volumes[request.Name] = volume
 	}
 
@@ -114,6 +117,38 @@ func (driver sharedVolumeDriver) Create(request *dockerVolume.CreateRequest) err
 	}
 
 	return nil
+}
+
+func (driver sharedVolumeDriver) Discover() {
+	if files, err := ioutil.ReadDir(*root); err == nil {
+		for _, file := range files {
+
+			filename := file.Name()
+
+			if volume, ok := driver.volumes[filename]; !ok && file.IsDir() {
+
+				volume = &sharedVolume{
+					Volume: &dockerVolume.Volume{
+						Name:       filename,
+						Mountpoint: filepath.Join(*root, filename),
+					},
+				}
+
+				if volume.hasLockfile() {
+					// This volume was locked before.
+					if err := volume.loadMetadata(); err == nil {
+
+						// No need to lock the volume. It is already locked.
+						driver.volumes[volume.Name] = volume
+						log.Infof("Loaded previously attached volume %s", volume.Name)
+
+					} else {
+						log.Warningf("Failed to load metadata of previously locked volume %s", filename)
+					}
+				}
+			}
+		}
+	}
 }
 
 func (driver sharedVolumeDriver) Remove(request *dockerVolume.RemoveRequest) error {
@@ -188,6 +223,8 @@ func (driver sharedVolumeDriver) Get(request *dockerVolume.GetRequest) (*dockerV
 			Status:     make(map[string]interface{}),
 		}
 
+		responseVolume.Status["protected"] = volume.Protected
+		responseVolume.Status["exclusive"] = volume.Exclusive
 		responseVolume.Status["locks"] = volume.getLocks()
 		responseVolume.Status["mounts"] = volume.getMounts()
 

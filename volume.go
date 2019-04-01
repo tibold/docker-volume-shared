@@ -110,6 +110,13 @@ func (volume *sharedVolume) isLocked() (bool, error) {
 	return false, nil
 }
 
+func (volume *sharedVolume) hasLockfile() bool {
+	lockFile := volume.GetLockFile()
+
+	file, err := os.Stat(lockFile)
+	return err == nil && !file.IsDir()
+}
+
 func (volume *sharedVolume) getLocks() []string {
 	locksDir := volume.GetLocksDir()
 
@@ -137,7 +144,7 @@ func (volume *sharedVolume) lock() error {
 
 	lockFilename := volume.GetLockFile()
 
-	if file, err := os.OpenFile(lockFilename, os.O_RDONLY|os.O_CREATE, 600); err == nil {
+	if file, err := os.OpenFile(lockFilename, os.O_RDONLY|os.O_CREATE, 0600); err == nil {
 		file.Close()
 	}
 
@@ -204,7 +211,7 @@ func (volume *sharedVolume) unlock() {
 func (volume *sharedVolume) mount(id string) error {
 	mountFile := volume.GetMountFile(id)
 
-	if file, err := os.OpenFile(mountFile, os.O_WRONLY|os.O_CREATE, 600); err == nil {
+	if file, err := os.OpenFile(mountFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600); err == nil {
 		file.WriteString(*hostname)
 		file.Close()
 	} else {
