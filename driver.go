@@ -57,20 +57,29 @@ func (driver sharedVolumeDriver) Create(request *dockerVolume.CreateRequest) err
 	driver.mutex.Lock()
 	defer driver.mutex.Unlock()
 
+	if _, ok := driver.volumes[request.Name]; ok {
+
+		// Path exists and it is already part of the bookkeeping
+
+		message := fmt.Sprintf("Volume %s already exists.", request.Name)
+		log.Warning(message)
+		return nil
+
+	}
+
 	volumePath := filepath.Join(driver.root, request.Name)
 
-	if _, err := os.Stat(volumePath); os.IsNotExist(err) {
-		// New volume
-		// Create volume from options.
-		volume := &sharedVolume{
-			Volume: &dockerVolume.Volume{
-				Name:       request.Name,
-				Mountpoint: volumePath,
-				CreatedAt:  time.Now().Format(time.RFC3339),
-			},
-			Protected: false,
-			Exclusive: true,
-		}
+	volume := &sharedVolume{
+		Volume: &dockerVolume.Volume{
+			Name:       request.Name,
+			Mountpoint: volumePath,
+			CreatedAt:  time.Now().Format(time.RFC3339),
+		},
+		Protected: false,
+		Exclusive: true,
+	}
+
+	if err := volume.loadMetadata(); err != nil {
 
 		if optsProtected, ok := request.Options["protected"]; ok {
 			if protected, err := strconv.ParseBool(optsProtected); err == nil {
@@ -89,31 +98,10 @@ func (driver sharedVolumeDriver) Create(request *dockerVolume.CreateRequest) err
 		}
 
 		volume.saveMetadata()
-		volume.lock()
-		driver.volumes[request.Name] = volume
-
-	} else if _, ok := driver.volumes[request.Name]; ok {
-
-		// Path exists and it is already part of the bookkeeping
-
-		message := fmt.Sprintf("Volume %s already exists.", request.Name)
-		log.Warning(message)
-		return nil
-
-	} else {
-		// Path exists but not part of the bookkeeping
-		// Load volume options from meta file.
-
-		volume := &sharedVolume{
-			Volume: &dockerVolume.Volume{
-				Name:       request.Name,
-				Mountpoint: volumePath,
-			},
-		}
-		volume.loadMetadata()
-		volume.lock()
-		driver.volumes[request.Name] = volume
 	}
+
+	volume.lock()
+	driver.volumes[request.Name] = volume
 
 	if *debug {
 		spew.Dump(driver.volumes)

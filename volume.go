@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -48,25 +49,29 @@ func (volume *sharedVolume) create() error {
 	fstat, err := os.Lstat(volume.Mountpoint)
 
 	if os.IsNotExist(err) {
-		err := os.MkdirAll(volume.Mountpoint, 0755)
-		if err == nil {
-			err = os.Mkdir(volume.GetDataDir(), 755)
-		}
-		if err == nil {
-			err = os.Mkdir(volume.GetLocksDir(), 755)
-		}
-
-		if err != nil {
-			_ = os.RemoveAll(volume.Mountpoint)
-			return err
-		}
-
-	} else if err != nil {
-		return err
+		err = os.Mkdir(volume.Mountpoint, 0750)
 	}
 
 	if fstat != nil && !fstat.IsDir() {
 		return fmt.Errorf("%v already exist and it's not a directory", volume.Mountpoint)
+	}
+
+	if err == nil {
+		dataDir := volume.GetDataDir()
+		if _, err = os.Lstat(dataDir); err == nil {
+			err = os.Mkdir(dataDir, 750)
+		}
+	}
+
+	if err == nil {
+		locksDir := volume.GetLocksDir()
+		if _, err = os.Lstat(locksDir); err == nil {
+			err = os.Mkdir(locksDir, 750)
+		}
+	}
+
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -97,7 +102,7 @@ func (volume *sharedVolume) isLocked() (bool, error) {
 
 	files, err := ioutil.ReadDir(locksDir)
 	if err != nil {
-		return true, err
+		return false, err
 	}
 
 	for _, file := range files {
@@ -243,11 +248,20 @@ func (volume *sharedVolume) unmount(id string) error {
 
 // Saves the volume metadata into a file
 func (volume *sharedVolume) saveMetadata() error {
+	var file *os.File
 	metaFile := filepath.Join(volume.Mountpoint, "meta.json")
 
 	content, err := json.MarshalIndent(volume, "", "  ")
 	if err == nil {
-		err = ioutil.WriteFile(metaFile, content, 0600)
+		// Creating a meta file only if it does not yet exist.
+		// This should stop concurrency issues when creating 2 volume with the same name and different options
+		if file, err = os.OpenFile(metaFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600); err == nil {
+			var count int
+			count, err = file.Write(content)
+			if count < len(content) {
+				err = io.ErrShortWrite
+			}
+		}
 	}
 
 	return err
