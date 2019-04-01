@@ -35,6 +35,9 @@ func newBeeGFSDriver(root string) sharedVolumeDriver {
 		hostname: hostname,
 	}
 
+	// Discover volumes that are already in use by the current node
+	driver.Discover()
+
 	return driver
 }
 
@@ -220,6 +223,7 @@ func (driver sharedVolumeDriver) Get(request *dockerVolume.GetRequest) (*dockerV
 		responseVolume := &dockerVolume.Volume{
 			Name:       volume.Name,
 			Mountpoint: volume.GetDataDir(),
+			CreatedAt:  volume.CreatedAt,
 			Status:     make(map[string]interface{}),
 		}
 

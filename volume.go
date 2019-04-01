@@ -245,7 +245,7 @@ func (volume *sharedVolume) unmount(id string) error {
 func (volume *sharedVolume) saveMetadata() error {
 	metaFile := filepath.Join(volume.Mountpoint, "meta.json")
 
-	content, err := json.MarshalIndent(volume, "", "")
+	content, err := json.MarshalIndent(volume, "", "  ")
 	if err == nil {
 		err = ioutil.WriteFile(metaFile, content, 0600)
 	}
