@@ -25,7 +25,7 @@ type sharedVolumeDriver struct {
 	hostname string
 }
 
-func newBeeGFSDriver(root string) sharedVolumeDriver {
+func newSharedFSDriver(root string) sharedVolumeDriver {
 	hostname, _ := os.Hostname()
 
 	driver := sharedVolumeDriver{

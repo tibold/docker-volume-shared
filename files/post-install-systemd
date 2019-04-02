@@ -1,2 +1,2 @@
 # Enable service
-systemctl enable docker-volume-beegfs.service
+systemctl enable docker-volume-sharedfs.service

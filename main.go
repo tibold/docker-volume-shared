@@ -11,7 +11,6 @@ import (
 )
 
 var (
-	// This is the path in beegfs-mounts.conf
 	root     = flag.String("root", "", "Base directory where volumes are created in the cluster")
 	debug    = flag.Bool("debug", true, "Enable verbose logging")
 	hostname = flag.String("hostname", "", "The hostname used in locking operations")
@@ -35,7 +34,7 @@ func main() {
 	// userID, _ := user.Lookup("root")
 	// groupID, _ := strconv.Atoi(userID.Gid)
 
-	driver := newBeeGFSDriver(*root)
+	driver := newSharedFSDriver(*root)
 	handler := volume.NewHandler(driver)
 	fmt.Println(handler.ServeUnix("sharedfs", 0))
 }

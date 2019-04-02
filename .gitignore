@@ -1,7 +1,7 @@
 *~
-docker-volume-beegfs
+docker-volume-sharedfs
 *.rpm
 *.deb
 obj
-.idea
 vendor/*/
+plugin/

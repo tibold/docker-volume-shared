@@ -6,5 +6,8 @@
     "go.toolsEnvVars": {
         "GOARCH": "amd64",
         "GOOS": "linux"
+    },
+    "files.associations": {
+        "Makefile.*": "makefile"
     }
 }
